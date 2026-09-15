@@ -1,17 +1,40 @@
 "use client";
 
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { Inbox, Trash2, RefreshCw, Eye, ArrowLeft, Download, Search, LogOut, Mail, Users, TrendingUp, CheckCircle2 } from "lucide-react";
+import { Inbox, Trash2, RefreshCw, Eye, ArrowLeft, Download, Search, LogOut, Mail, Users, TrendingUp, CheckCircle2, BarChart3, CalendarDays, Target, Clock3 } from "lucide-react";
 import Link from "next/link";
-import { supabase } from "@/lib/supabase";
 
 interface Message {
-  id: string; name: string; email: string; subject: string; message: string; created_at: string; read?: boolean;
+  id: string;
+  name: string;
+  email: string;
+  subject: string;
+  message: string;
+  created_at: string;
+  read?: boolean;
 }
 
 function extractField(message: string, label: string) {
   const match = message.match(new RegExp(`${label}:\\s*([^\\n]+)`, "i"));
   return match?.[1]?.trim() || "—";
+}
+
+function monthKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function monthLabel(date: Date) {
+  return date.toLocaleString("en-US", { month: "short" });
+}
+
+function normalizeCategory(value: string) {
+  const v = value.toLowerCase();
+  if (v.includes("ai") || v.includes("agent") || v.includes("automation")) return "AI / Automation";
+  if (v.includes("web") || v.includes("website")) return "Web Development";
+  if (v.includes("ecommerce") || v.includes("e-commerce") || v.includes("shop")) return "E-commerce";
+  if (v.includes("saas")) return "SaaS";
+  if (!value || value === "—") return "Other";
+  return value;
 }
 
 export default function AdminDashboard() {
@@ -20,60 +43,121 @@ export default function AdminDashboard() {
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "unread" | "read">("all");
-  const [stats, setStats] = useState({ total: 0, today: 0, unread: 0, week: 0, month: 0 });
+  const [range, setRange] = useState<"all" | "30" | "90" | "365">("all");
 
   const fetchMessages = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await supabase().from("messages").select("*").order("created_at", { ascending: false });
-    if (error) console.error("Error fetching messages:", error);
-    else {
-      const msgs = (data || []) as Message[];
-      setMessages(msgs);
-      const now = new Date();
-      const day = 24 * 60 * 60 * 1000;
-      setStats({
-        total: msgs.length,
-        today: msgs.filter(m => now.getTime() - new Date(m.created_at).getTime() < day && new Date(m.created_at).getDate() === now.getDate()).length,
-        unread: msgs.filter(m => m.read !== true).length,
-        week: msgs.filter(m => now.getTime() - new Date(m.created_at).getTime() < 7 * day).length,
-        month: msgs.filter(m => new Date(m.created_at).getMonth() === now.getMonth() && new Date(m.created_at).getFullYear() === now.getFullYear()).length,
-      });
+    try {
+      const response = await fetch("/api/admin/messages", { cache: "no-store" });
+      if (!response.ok) throw new Error("Failed to load leads");
+      const payload = await response.json();
+      setMessages((payload.messages || []) as Message[]);
+    } catch (error) {
+      console.error("Error fetching messages:", error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, []);
 
   useEffect(() => { fetchMessages(); }, [fetchMessages]);
 
+  const stats = useMemo(() => {
+    const now = new Date();
+    const day = 24 * 60 * 60 * 1000;
+    const inRange = (m: Message) => {
+      if (range === "all") return true;
+      return now.getTime() - new Date(m.created_at).getTime() <= Number(range) * day;
+    };
+    const scoped = messages.filter(inRange);
+    const today = scoped.filter(m => {
+      const d = new Date(m.created_at);
+      return d.toDateString() === now.toDateString();
+    }).length;
+    const week = scoped.filter(m => now.getTime() - new Date(m.created_at).getTime() <= 7 * day).length;
+    const month = scoped.filter(m => {
+      const d = new Date(m.created_at);
+      return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    }).length;
+    const unread = scoped.filter(m => m.read !== true).length;
+    const previousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const previousMonthCount = messages.filter(m => {
+      const d = new Date(m.created_at);
+      return d.getMonth() === previousMonth.getMonth() && d.getFullYear() === previousMonth.getFullYear();
+    }).length;
+    const growth = previousMonthCount === 0 ? (month > 0 ? 100 : 0) : Math.round(((month - previousMonthCount) / previousMonthCount) * 100);
+    return { total: scoped.length, today, unread, week, month, previousMonthCount, growth, scoped };
+  }, [messages, range]);
+
+  const monthlyReport = useMemo(() => {
+    const now = new Date();
+    return Array.from({ length: 12 }, (_, index) => {
+      const d = new Date(now.getFullYear(), now.getMonth() - (11 - index), 1);
+      const key = monthKey(d);
+      const count = messages.filter(m => monthKey(new Date(m.created_at)) === key).length;
+      return { key, label: monthLabel(d), count, date: d };
+    });
+  }, [messages]);
+
+  const projectReport = useMemo(() => {
+    const counts = new Map<string, number>();
+    stats.scoped.forEach(m => {
+      const category = normalizeCategory(extractField(m.message, "Project Type"));
+      counts.set(category, (counts.get(category) || 0) + 1);
+    });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  }, [stats.scoped]);
+
+  const timelineReport = useMemo(() => {
+    const counts = new Map<string, number>();
+    stats.scoped.forEach(m => {
+      const value = extractField(m.message, "Timeline");
+      if (value !== "—") counts.set(value, (counts.get(value) || 0) + 1);
+    });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  }, [stats.scoped]);
+
+  const maxMonthly = Math.max(1, ...monthlyReport.map(m => m.count));
+
   const filteredMessages = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return messages.filter(m => {
+    return stats.scoped.filter(m => {
       const matchesFilter = filter === "all" || (filter === "unread" ? m.read !== true : m.read === true);
       const matchesSearch = !q || [m.name, m.email, m.subject, m.message].some(v => v?.toLowerCase().includes(q));
       return matchesFilter && matchesSearch;
     });
-  }, [messages, search, filter]);
+  }, [stats.scoped, search, filter]);
 
   const markRead = async (msg: Message) => {
     if (msg.read === true) return;
-    const { error } = await supabase().from("messages").update({ read: true }).eq("id", msg.id);
-    if (!error) {
+    const response = await fetch("/api/admin/messages", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: msg.id, read: true }),
+    });
+    if (response.ok) {
       const updated = { ...msg, read: true };
       setMessages(prev => prev.map(m => m.id === msg.id ? updated : m));
       setSelectedMessage(updated);
-      setStats(prev => ({ ...prev, unread: Math.max(0, prev.unread - 1) }));
     }
   };
 
   const deleteMessage = async (id: string) => {
     if (!confirm("Delete this lead?")) return;
-    const { error } = await supabase().from("messages").delete().eq("id", id);
-    if (!error) { setMessages(prev => prev.filter(m => m.id !== id)); if (selectedMessage?.id === id) setSelectedMessage(null); }
+    const response = await fetch("/api/admin/messages", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    if (response.ok) {
+      setMessages(prev => prev.filter(m => m.id !== id));
+      if (selectedMessage?.id === id) setSelectedMessage(null);
+    }
   };
 
   const deleteAll = async () => {
     if (!confirm("Are you sure you want to delete all messages?")) return;
-    const { error } = await supabase().from("messages").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-    if (!error) { setMessages([]); setSelectedMessage(null); setStats({ total: 0, today: 0, unread: 0, week: 0, month: 0 }); }
+    const response = await fetch("/api/admin/messages", { method: "DELETE" });
+    if (response.ok) { setMessages([]); setSelectedMessage(null); }
   };
 
   const logout = async () => { await fetch("/api/admin/logout", { method: "POST" }); window.location.href = "/admin/login"; };
@@ -81,7 +165,7 @@ export default function AdminDashboard() {
   const exportCSV = () => {
     const headers = ["Name", "Email", "Subject", "Message", "Date"];
     const escapeCSV = (value: string) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-    const rows = messages.map(m => [m.name, m.email, m.subject, m.message, m.created_at].map(escapeCSV).join(","));
+    const rows = stats.scoped.map(m => [m.name, m.email, m.subject, m.message, m.created_at].map(escapeCSV).join(","));
     const csv = [headers.map(escapeCSV).join(","), ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" }); const url = URL.createObjectURL(blob); const a = document.createElement("a");
     a.href = url; a.download = `leads_${new Date().toISOString().split("T")[0]}.csv`; a.click(); URL.revokeObjectURL(url);
@@ -95,6 +179,7 @@ export default function AdminDashboard() {
         <div className="container-custom px-4 sm:px-6 lg:px-8 py-4 flex flex-col sm:flex-row justify-between gap-4">
           <div><Link href="/" className="inline-flex items-center gap-2 text-primary-600 dark:text-primary-400 mb-2 text-sm"><ArrowLeft size={16}/> Back to Portfolio</Link><h1 className="text-3xl font-bold">Lead CRM</h1><p className="text-gray-600 dark:text-gray-400 mt-1">Manage portfolio leads, messages and activity.</p></div>
           <div className="flex flex-wrap gap-2 items-start">
+            <select value={range} onChange={e => setRange(e.target.value as typeof range)} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700"><option value="all">All time</option><option value="30">Last 30 days</option><option value="90">Last 90 days</option><option value="365">Last 12 months</option></select>
             <button onClick={fetchMessages} disabled={loading} className="flex items-center gap-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg disabled:opacity-50"><RefreshCw size={18} className={loading ? "animate-spin" : ""}/> Refresh</button>
             {messages.length > 0 && <><button onClick={exportCSV} className="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg"><Download size={18}/> Export</button><button onClick={deleteAll} className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg"><Trash2 size={18}/> Delete All</button></>}
             <button onClick={logout} className="flex items-center gap-2 px-4 py-2 border rounded-lg"><LogOut size={18}/> Logout</button>
@@ -106,6 +191,19 @@ export default function AdminDashboard() {
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
           {[{label:"Total Leads",value:stats.total,icon:Users},{label:"Today",value:stats.today,icon:TrendingUp},{label:"Unread",value:stats.unread,icon:Mail},{label:"7 Days",value:stats.week,icon:CheckCircle2},{label:"This Month",value:stats.month,icon:Inbox}].map(({label,value,icon:Icon}) => <div key={label} className="bg-white dark:bg-gray-800 rounded-xl p-5 border border-gray-200 dark:border-gray-700"><div className="flex justify-between items-center"><div><p className="text-sm text-gray-500 dark:text-gray-400">{label}</p><p className="text-3xl font-bold mt-1">{value}</p></div><Icon size={24} className="text-primary-600"/></div></div>)}
         </div>
+
+        <section className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+          <div className="xl:col-span-2 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+            <div className="flex items-center justify-between mb-5"><div><h2 className="text-xl font-bold flex items-center gap-2"><BarChart3 size={20}/> Monthly Lead Report</h2><p className="text-sm text-gray-500 mt-1">Leads received over the last 12 months</p></div><div className={`text-sm font-semibold ${stats.growth >= 0 ? "text-green-600" : "text-red-600"}`}>{stats.growth >= 0 ? "+" : ""}{stats.growth}% vs last month</div></div>
+            <div className="flex items-end gap-2 h-48">{monthlyReport.map(item => <div key={item.key} className="flex-1 h-full flex flex-col justify-end items-center gap-2"><span className="text-xs font-semibold">{item.count}</span><div className="w-full max-w-12 rounded-t-md bg-primary-600 transition-all" style={{ height: `${Math.max(5, (item.count / maxMonthly) * 78)}%` }} title={`${item.label}: ${item.count} leads`} /><span className="text-xs text-gray-500">{item.label}</span></div>)}</div>
+          </div>
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6"><h2 className="text-xl font-bold flex items-center gap-2"><Target size={20}/> Performance</h2><div className="mt-5 space-y-5"><div><p className="text-sm text-gray-500">This month</p><p className="text-3xl font-bold">{stats.month}</p><p className="text-xs text-gray-500 mt-1">Previous month: {stats.previousMonthCount}</p></div><div><p className="text-sm text-gray-500">Unread rate</p><p className="text-3xl font-bold">{stats.total ? Math.round((stats.unread / stats.total) * 100) : 0}%</p></div><div><p className="text-sm text-gray-500">Last 7 days</p><p className="text-3xl font-bold">{stats.week}</p></div></div></div>
+        </section>
+
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6"><h2 className="text-xl font-bold flex items-center gap-2"><TrendingUp size={20}/> Project Demand</h2><p className="text-sm text-gray-500 mt-1">Based on the Project Type selected by leads</p><div className="mt-5 space-y-4">{projectReport.length === 0 ? <p className="text-gray-500">No project data yet.</p> : projectReport.map(([name, count]) => <div key={name}><div className="flex justify-between text-sm mb-1"><span>{name}</span><span className="font-semibold">{count}</span></div><div className="h-2 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden"><div className="h-full bg-primary-600 rounded-full" style={{ width: `${Math.max(4, (count / Math.max(1, projectReport[0][1])) * 100)}%` }} /></div></div>)}</div></div>
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6"><h2 className="text-xl font-bold flex items-center gap-2"><Clock3 size={20}/> Timeline Demand</h2><p className="text-sm text-gray-500 mt-1">Most requested delivery timelines</p><div className="mt-5 space-y-3">{timelineReport.length === 0 ? <p className="text-gray-500">No timeline data yet.</p> : timelineReport.map(([name, count]) => <div key={name} className="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-700"><span className="truncate pr-4">{name}</span><span className="font-bold">{count}</span></div>)}</div></div>
+        </section>
 
         <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 mb-6 flex flex-col md:flex-row gap-3">
           <div className="relative flex-1"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name, email, subject or message..." className="w-full pl-10 pr-4 py-3 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 outline-none"/></div>
@@ -125,7 +223,7 @@ export default function AdminDashboard() {
           </section>
         </div>
 
-        <section className="mt-6 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6"><h2 className="text-xl font-bold mb-4">Analytics Snapshot</h2><div className="grid grid-cols-1 md:grid-cols-3 gap-6"><div><p className="text-sm text-gray-500">Weekly conversion activity</p><div className="mt-3 h-3 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden"><div className="h-full bg-primary-600" style={{width:`${stats.total ? Math.min(100,(stats.week/stats.total)*100) : 0}%`}}/></div><p className="text-xs text-gray-500 mt-2">{stats.week} of {stats.total} leads are from the last 7 days</p></div><div><p className="text-sm text-gray-500">Unread rate</p><p className="text-3xl font-bold mt-2">{stats.total ? Math.round((stats.unread/stats.total)*100) : 0}%</p></div><div><p className="text-sm text-gray-500">Monthly leads</p><p className="text-3xl font-bold mt-2">{stats.month}</p></div></div></section>
+        <section className="mt-6 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6"><h2 className="text-xl font-bold mb-2 flex items-center gap-2"><CalendarDays size={20}/> Analytics Snapshot</h2><p className="text-sm text-gray-500 mb-5">Current analytics are based on contact-form leads. A lead is not counted as a confirmed client until a CRM pipeline status is added.</p><div className="grid grid-cols-1 md:grid-cols-3 gap-6"><div><p className="text-sm text-gray-500">Weekly activity</p><p className="text-3xl font-bold mt-2">{stats.week}</p><p className="text-xs text-gray-500 mt-1">leads in the last 7 days</p></div><div><p className="text-sm text-gray-500">Monthly leads</p><p className="text-3xl font-bold mt-2">{stats.month}</p><p className="text-xs text-gray-500 mt-1">current calendar month</p></div><div><p className="text-sm text-gray-500">Growth</p><p className={`text-3xl font-bold mt-2 ${stats.growth >= 0 ? "text-green-600" : "text-red-600"}`}>{stats.growth >= 0 ? "+" : ""}{stats.growth}%</p><p className="text-xs text-gray-500 mt-1">vs previous month</p></div></div></section>
       </main>
     </div>
   );
